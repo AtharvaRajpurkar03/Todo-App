@@ -8,6 +8,8 @@ from application import app, db
 from application.models import User
 from application.extensions import bcrypt
 from application.forms import TodoForm
+from flask import session
+
 
 
 
@@ -38,6 +40,7 @@ def login():
 @login_required
 def logout():
     logout_user()
+    session.clear()
     flash("You have been logged out.", "info")
     return redirect(url_for("login"))
 
@@ -70,86 +73,130 @@ def register():
 
 
 @app.route("/view_todos", methods=["GET"])
-@login_required  # Requires login
+@login_required
 def view_todos():
-    todos = db.todos.find({"user_id": current_user.id})  # Show only user-specific tasks
-    return render_template("view_todos.html", todos=todos)
+    try:
+        # Fetch only tasks belonging to the logged-in user
+        todos = db.todos.find({"user_id": current_user.id})  # Filter tasks for the user
+
+        tasks = []
+        for todo in todos:
+            print(todo)  # Debug log 3 - Print each task matching user ID
+            tasks.append({
+                "_id": str(todo["_id"]),  # Convert ObjectId to string for HTML usage
+                "name": todo["name"],
+                "description": todo["description"],
+                "completed": todo["completed"],
+                "date_created": todo["date_created"].strftime("%Y-%m-%d %H:%M:%S")  # Format date
+            })
+
+        # Render the template with filtered tasks
+        return render_template("view_todos.html", todos=tasks)
+
+    except Exception as e:
+        print("Error occurred:", str(e)) 
+        flash("Failed to load tasks!", "danger")
+        return redirect(url_for("add_todo"))
 
 
-@app.route("/add_todo", methods=["POST"])
+
+
+@app.route("/add_todo", methods=['GET', 'POST'])
 @login_required
 def add_todo():
-    # Get form data
-    name = request.form.get("name")
-    description = request.form.get("description")
-    completed = False  # Default value for completion status
+    form = TodoForm()  # Initialize the form
 
-    # Link task associated with the logged-in user
-    new_task = {
-        "user_id": current_user.id,  # Store user ID for task ownership
-        "name": name,
-        "description": description,
-        "completed": completed,
-        "date_created": datetime.utcnow()
-    }
-    db.todos.insert_one(new_task)  # Save to database
+    if form.validate_on_submit():  # Handle POST request
+        name = form.name.data
+        description = form.description.data
+        completed = False
 
-    flash("Task added successfully!", "success")
-    return redirect(url_for("view_todos"))
+        # Save task to database
+        new_task = {
+            "user_id": current_user.id,
+            "name": name,
+            "description": description,
+            "completed": completed,
+            "date_created": datetime.utcnow()
+        }
+        db.todos.insert_one(new_task)
+
+        flash("Task added successfully!", "success")
+        return redirect(url_for("view_todos"))
+
+    # Handle GET request
+    return render_template("add_todo.html", form=form)
+
+
 
 @app.route("/update_todo/<id>", methods=["GET", "POST"])
 @login_required
 def update_todo(id):
-    # Find the todo by ID and user
-    todo = db.todos.find_one({"_id": ObjectId(id), "user_id": current_user.id})
+    try:
+        # Validate ObjectId format
+        todo_id = ObjectId(id)  # Convert ID to ObjectId
 
-    if not todo:
-        flash("Todo not found!", "danger")
-        return redirect(url_for("view_todos"))
+        # Query for the task belonging to the logged-in user
+        todo = db.todos.find_one({
+            "_id": todo_id,  # Match task ID
+            "user_id": current_user.id  # Match logged-in user ID
+        })
 
-    # Initialize form with existing values
-    form = TodoForm(
-        name=todo["name"],
-        description=todo["description"],
-        completed=todo["completed"]
-    )
+        # Handle case where task is not found
+        if not todo:
+            flash("Todo not found!", "danger")
+            return redirect(url_for("view_todos"))
 
-    if request.method == "POST" and form.validate_on_submit():
-        # Explicitly check for the value of completed
-        completed_status = form.completed.data  # Fetch true or false directly
-
-        # Update the task in MongoDB
-        db.todos.update_one(
-            {"_id": ObjectId(id)},
-            {"$set": {
-                "name": form.name.data,
-                "description": form.description.data,
-                "completed": completed_status  # Explicitly update status
-            }}
+        # Initialize form with existing data
+        form = TodoForm(
+            name=todo["name"],
+            description=todo["description"],
+            completed=todo["completed"]
         )
 
-        flash("Todo updated successfully!", "success")
+        if form.validate_on_submit():
+            # Update the task with new values
+            db.todos.update_one(
+                {"_id": todo_id},
+                {"$set": {
+                    "name": form.name.data,
+                    "description": form.description.data,
+                    "completed": form.completed.data
+                }}
+            )
+            flash("Todo updated successfully!", "success")
+            return redirect(url_for("view_todos"))
+
+        return render_template("update_todo.html", form=form, todo=todo)
+
+    except Exception as e:
+        flash(f"Error occurred: {str(e)}", "danger")
         return redirect(url_for("view_todos"))
 
-    # Render update form with pre-filled values
-    return render_template("update_todo.html", form=form, todo=todo)
 
-
-
-@app.route("/delete_todo/<id>", methods=["POST"])  # Accept POST instead of DELETE
+@app.route("/delete_todo/<id>", methods=["POST"])
 @login_required
 def delete_todo(id):
-    # Find the todo by ID and user
-    todo = db.todos.find_one({"_id": ObjectId(id), "user_id": current_user.id})
+    try:
+        # Validate ObjectId format
+        todo_id = ObjectId(id)  # Convert ID to ObjectId
 
-    if not todo:
-        flash("Todo not found!", "danger")
+        # Query to ensure the task belongs to the logged-in user
+        todo = db.todos.find_one({
+            "_id": todo_id,
+            "user_id": current_user.id  # Match user ID
+        })
+
+        # Handle case where task is not found
+        if not todo:
+            flash("Todo not found!", "danger")
+            return redirect(url_for("view_todos"))
+
+        # Delete the task
+        db.todos.delete_one({"_id": todo_id})
+        flash("Todo deleted successfully!", "success")
         return redirect(url_for("view_todos"))
 
-    # Delete the todo
-    db.todos.delete_one({"_id": ObjectId(id)})
-    flash("Todo deleted successfully!", "success")
-
-    # Redirect back to view todos
-    return redirect(url_for("view_todos"))
-
+    except Exception as e:
+        flash(f"Error occurred: {str(e)}", "danger")
+        return redirect(url_for("view_todos"))
